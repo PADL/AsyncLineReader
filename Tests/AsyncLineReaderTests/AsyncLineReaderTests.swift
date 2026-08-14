@@ -300,6 +300,82 @@ struct HistoryReplacementTests {
 }
 
 struct ByteStreamTests {
+  /// the flag is a property of the open file description, shared with whoever else holds it —
+  /// the shell that started us, for one — so it must not be left set
+  @Test
+  func leavesTheDescriptorFlagsAsItFoundThem() async {
+    let keyboard = Keyboard()
+    keyboard.type("x")
+
+    let before = fcntl(keyboard.readEnd, F_GETFL)
+    let stream = ByteStream(fileDescriptor: keyboard.readEnd)
+    _ = await stream.next()
+    #expect(fcntl(keyboard.readEnd, F_GETFL) == before)
+    keyboard.endInput()
+  }
+
+  /// a read that finished before its timeout must not end the read that follows it
+  @Test
+  func aCancelledTimeoutDoesNotEndALaterRead() async {
+    let keyboard = Keyboard()
+    keyboard.type("a")
+
+    let stream = ByteStream(fileDescriptor: keyboard.readEnd)
+    #expect(await stream.next(timeout: .seconds(5)) == UInt8(ascii: "a"))
+
+    let next = Task { await stream.next() }
+    try? await Task.sleep(for: .milliseconds(150))
+    keyboard.type("b")
+    #expect(await next.value == UInt8(ascii: "b"))
+    keyboard.endInput()
+  }
+
+  @Test
+  func returnsWhenTheReadingTaskIsCancelled() async {
+    let keyboard = Keyboard()
+    let stream = ByteStream(fileDescriptor: keyboard.readEnd)
+
+    let next = Task { await stream.next() }
+    try? await Task.sleep(for: .milliseconds(50))
+    next.cancel()
+    #expect(await next.value == nil)
+    keyboard.endInput()
+  }
+
+  @Test
+  func deliversChunksInOrder() async {
+    let keyboard = Keyboard()
+    let stream = ByteStream(fileDescriptor: keyboard.readEnd)
+
+    for index in 0..<16 {
+      keyboard.type("\(index % 10)")
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+
+    var read = ""
+    for _ in 0..<16 {
+      guard let byte = await stream.next(timeout: .seconds(2)) else { break }
+      read.append(Character(UnicodeScalar(byte)))
+    }
+    #expect(read == "0123456789012345")
+    keyboard.endInput()
+  }
+}
+
+struct SharedCompletionTests {
+  /// candidates that agree on nothing must not be applied, or the first tab press would delete
+  /// what the user typed
+  @Test
+  func agreeingOnNothingYieldsAnEmptyCompletion() {
+    let shared = LineReader.sharedCompletion(of: [
+      Completion("abc", replacing: 0..<1),
+      Completion("xyz", replacing: 0..<1),
+    ])
+    #expect(shared?.text == "")
+  }
+}
+
+struct UnusedByteStreamTests {
   @Test
   func buffersBytesThatArriveBeforeTheyAreWanted() async {
     let keyboard = Keyboard()

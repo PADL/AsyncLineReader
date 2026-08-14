@@ -53,8 +53,14 @@ public struct Terminal: Sendable {
       let count = bytes[offset...].withUnsafeBytes {
         write(output, $0.baseAddress, $0.count)
       }
-      guard count > 0 else { break }
-      offset += count
+      if count > 0 {
+        offset += count
+      } else if count < 0, errno == EINTR || errno == EAGAIN {
+        // an escape sequence written by halves would be seen as text, so keep trying
+        continue
+      } else {
+        break
+      }
     }
   }
 }

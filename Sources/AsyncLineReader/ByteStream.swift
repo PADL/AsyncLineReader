@@ -15,6 +15,7 @@
 //
 
 @preconcurrency import Dispatch
+import Foundation
 
 #if canImport(Glibc)
 import Glibc
@@ -28,14 +29,40 @@ import Darwin
 ///
 /// A stream has a single consumer. Bytes that arrive whilst nobody is waiting, or after a read
 /// has timed out, are buffered rather than dropped.
+/// Bytes read from the descriptor before the consumer asked for them. The dispatch source
+/// appends under a lock rather than hopping to the actor, so that chunks cannot be reordered by
+/// the order the hops happen to run in.
+private final class PendingBytes: @unchecked Sendable {
+  private let lock = NSLock()
+  private var bytes = [UInt8]()
+  private var isAtEnd = false
+
+  func append(_ newBytes: [UInt8], isAtEnd: Bool) {
+    lock.lock()
+    defer { lock.unlock() }
+    bytes.append(contentsOf: newBytes)
+    self.isAtEnd = self.isAtEnd || isAtEnd
+  }
+
+  func take() -> (bytes: [UInt8], isAtEnd: Bool) {
+    lock.lock()
+    defer { lock.unlock() }
+    let taken = bytes
+    bytes = []
+    return (taken, isAtEnd)
+  }
+}
+
 actor ByteStream {
   private let fileDescriptor: CInt
   private let queue = DispatchQueue(label: "com.padl.AsyncLineReader.input", qos: .userInteractive)
+  private let pending = PendingBytes()
   private var source: (any DispatchSourceRead)?
   private var buffer = [UInt8]()
   private var waiter: CheckedContinuation<(), Never>?
   private var isFinished = false
-  private var savedFlags: CInt?
+  /// distinguishes the wait a timeout was started for from any later one
+  private var generation = 0
 
   /// True once the file descriptor has reached end of file and everything read from it has been
   /// consumed.
@@ -50,19 +77,12 @@ actor ByteStream {
   private func start() {
     guard source == nil, !isFinished else { return }
 
-    // the handler drains the descriptor in one go, which needs it to be non-blocking: that is
-    // also the only way to see end of file, as a read source is not woken by it on all platforms
-    let flags = fcntl(fileDescriptor, F_GETFL)
-    if flags >= 0, flags & O_NONBLOCK == 0 {
-      savedFlags = flags
-      _ = fcntl(fileDescriptor, F_SETFL, flags | O_NONBLOCK)
-    }
-
     let source = DispatchSource.makeReadSource(fileDescriptor: fileDescriptor, queue: queue)
-    source.setEventHandler { [weak self] in
-      guard let self else { return }
+    source.setEventHandler { [weak self, pending, fileDescriptor] in
       let (bytes, isAtEnd) = Self.drain(fileDescriptor: fileDescriptor)
-      Task { await self.deliver(bytes, isAtEnd: isAtEnd) }
+      pending.append(bytes, isAtEnd: isAtEnd)
+      guard let self else { return }
+      Task { await self.deliver() }
     }
     source.resume()
     self.source = source
@@ -70,9 +90,23 @@ actor ByteStream {
 
   /// Reads everything the descriptor has to offer, stopping at end of file or when it would
   /// block.
+  ///
+  /// Reading without blocking needs O_NONBLOCK, which is a property of the open file description
+  /// and so is shared with whoever else holds it — the shell that started us, for one. It is
+  /// therefore set for the duration of the read and put back afterwards, rather than left on.
   private nonisolated static func drain(
     fileDescriptor: CInt
   ) -> (bytes: [UInt8], isAtEnd: Bool) {
+    let savedFlags = fcntl(fileDescriptor, F_GETFL)
+    if savedFlags >= 0, savedFlags & O_NONBLOCK == 0 {
+      _ = fcntl(fileDescriptor, F_SETFL, savedFlags | O_NONBLOCK)
+    }
+    defer {
+      if savedFlags >= 0, savedFlags & O_NONBLOCK == 0 {
+        _ = fcntl(fileDescriptor, F_SETFL, savedFlags)
+      }
+    }
+
     var bytes = [UInt8]()
     var chunk = [UInt8](repeating: 0, count: 1024)
 
@@ -94,7 +128,8 @@ actor ByteStream {
     }
   }
 
-  private func deliver(_ bytes: [UInt8], isAtEnd: Bool) {
+  private func deliver() {
+    let (bytes, isAtEnd) = pending.take()
     buffer.append(contentsOf: bytes)
     if isAtEnd {
       finish()
@@ -103,33 +138,53 @@ actor ByteStream {
   }
 
   private func resumeWaiter() {
+    generation += 1
     guard let waiter else { return }
     self.waiter = nil
     waiter.resume()
   }
 
-  /// Returns the next byte, or nil at end of file or if `timeout` elapses first.
+  /// Returns the next byte, or nil at end of file, if the calling task is cancelled, or if
+  /// `timeout` elapses first.
   func next(timeout: Duration? = nil) async -> UInt8? {
     start()
+    deliver()
 
-    if buffer.isEmpty, !isFinished {
+    if buffer.isEmpty, !isFinished, !Task.isCancelled {
+      let generation = generation
       let timer: Task<(), Never>? = timeout.map { timeout in
         Task { [weak self] in
-          try? await Task.sleep(for: timeout)
-          await self?.expire()
+          do {
+            try await Task.sleep(for: timeout)
+          } catch {
+            // cancelled: the wait it belonged to has already ended
+            return
+          }
+          await self?.expire(generation)
         }
       }
       defer { timer?.cancel() }
 
-      await withCheckedContinuation { continuation in
-        waiter = continuation
+      await withTaskCancellationHandler {
+        await withCheckedContinuation { continuation in
+          if Task.isCancelled {
+            continuation.resume()
+          } else {
+            waiter = continuation
+          }
+        }
+      } onCancel: {
+        Task { await self.expire(generation) }
       }
     }
 
     return buffer.isEmpty ? nil : buffer.removeFirst()
   }
 
-  private func expire() {
+  /// Ends the wait `generation` was taken for, if it is still the current one. A later waiter is
+  /// left alone: it has its own timeout.
+  private func expire(_ generation: Int) {
+    guard generation == self.generation else { return }
     resumeWaiter()
   }
 
@@ -153,9 +208,5 @@ actor ByteStream {
     isFinished = true
     source?.cancel()
     source = nil
-    if let savedFlags {
-      _ = fcntl(fileDescriptor, F_SETFL, savedFlags)
-      self.savedFlags = nil
-    }
   }
 }

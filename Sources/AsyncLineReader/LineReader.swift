@@ -223,24 +223,39 @@ public actor LineReader {
     }
 
     let work = Task { try await body() }
-    let watcher = Task { [decoder] in
+    // without a terminal there is nobody to press escape, and reading standard input would take
+    // bytes from whatever else is feeding it
+    let watcher: Task<(), Never>? = terminal.isInteractive ? Task { [decoder] in
       while let key = await decoder.next() {
         if shouldCancel(key) {
           work.cancel()
           return
         }
       }
-    }
-    defer { watcher.cancel() }
+    } : nil
+
+    defer { work.cancel() }
 
     do {
       let value = try await work.value
-      await stream.flush()
+      await stop(watcher)
       return value
     } catch is CancellationError {
-      await stream.flush()
+      await stop(watcher)
       return nil
+    } catch {
+      await stop(watcher)
+      throw error
     }
+  }
+
+  /// Ends the watcher and waits for it, so that it cannot be midway through a read when the line
+  /// editor starts reading again.
+  private func stop(_ watcher: Task<(), Never>?) async {
+    guard let watcher else { return }
+    watcher.cancel()
+    await watcher.value
+    await stream.flush()
   }
 
   private func readLineWithoutEditing() async throws -> String {
@@ -294,8 +309,9 @@ public actor LineReader {
       state.candidates = candidates
       state.original = buffer
 
-      // as much of the completion as every candidate agrees on can be applied straight away
-      if let shared = Self.sharedCompletion(of: candidates) {
+      // as much of the completion as every candidate agrees on can be applied straight away,
+      // unless they agree on nothing, which would delete what the user typed
+      if let shared = Self.sharedCompletion(of: candidates), !shared.text.isEmpty {
         let completed = Self.apply(shared, to: buffer)
         if completed != buffer {
           buffer = completed
@@ -365,7 +381,7 @@ public actor LineReader {
     // scroll the line horizontally so that the cursor is always on screen
     var start = 0
     var cursor = buffer.cursor
-    let characters = Array(buffer.text)
+    let characters = buffer.characters
     if cursor > available {
       start = cursor - available
       cursor = available
