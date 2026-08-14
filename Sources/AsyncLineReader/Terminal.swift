@@ -14,6 +14,9 @@
 // limitations under the License.
 //
 
+// The terminal modes here are the ones linenoise established for a line editor, by way of
+// swift-commandlinekit; see the acknowledgements in LICENSE.md.
+
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)

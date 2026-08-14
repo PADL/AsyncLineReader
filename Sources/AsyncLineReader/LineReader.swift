@@ -14,6 +14,10 @@
 // limitations under the License.
 //
 
+// The editing model — the key bindings, cycling through completions with the tab key, and
+// matching the bracket before the cursor — follows linenoise by way of swift-commandlinekit; see
+// the acknowledgements in LICENSE.md.
+
 public enum LineReaderError: Error, Sendable, Equatable {
   /// the input ended, i.e. Ctrl-D on an empty line, or a closed standard input
   case endOfFile

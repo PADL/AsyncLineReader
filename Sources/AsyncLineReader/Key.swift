@@ -14,6 +14,9 @@
 // limitations under the License.
 //
 
+// Which escape sequences the editing and cursor keys arrive as, and which control keys mean
+// what, follow linenoise by way of swift-commandlinekit; see the acknowledgements in LICENSE.md.
+
 /// A keystroke, as decoded from the terminal's byte stream.
 public enum Key: Sendable, Equatable {
   case character(Character)

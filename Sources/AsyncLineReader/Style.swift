@@ -14,6 +14,8 @@
 // limitations under the License.
 //
 
+// Bracket matching behaves as it does in swift-commandlinekit; see LICENSE.md.
+
 /// How the prompt, the line being typed, and matching brackets are coloured.
 ///
 /// Each property is the escape sequence to introduce that text with; the reader resets the

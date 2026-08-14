@@ -78,6 +78,15 @@ swift test
 swift run line-reader-demo   # a small REPL: completion, history, an interruptible watch
 ```
 
+## Acknowledgements
+
+Written from scratch, but its behaviour was arrived at by reading
+[swift-commandlinekit](https://github.com/objecthub/swift-commandlinekit) and, behind it,
+[linenoise](https://github.com/antirez/linenoise): the terminal modes, the control key bindings,
+the escape sequences the editing keys arrive as, how tab cycles through candidates, and which
+bracket is matched. Their copyright notice is reproduced in `LICENSE.md`, and files that follow
+their lead say so.
+
 ## Not yet done
 
 * multi line editing: a line longer than the terminal scrolls horizontally instead of wrapping
