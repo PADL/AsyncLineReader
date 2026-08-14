@@ -49,14 +49,24 @@ public struct Terminal: Sendable {
   func emit(_ string: String) {
     let bytes = Array(string.utf8)
     var offset = 0
+    var attempts = 0
+    let maximumAttempts = 64
     while offset < bytes.count {
       let count = bytes[offset...].withUnsafeBytes {
         write(output, $0.baseAddress, $0.count)
       }
       if count > 0 {
         offset += count
-      } else if count < 0, errno == EINTR || errno == EAGAIN {
+        attempts = 0
+      } else if count < 0, errno == EINTR {
         // an escape sequence written by halves would be seen as text, so keep trying
+        continue
+      } else if count < 0, errno == EAGAIN || errno == EWOULDBLOCK, attempts < maximumAttempts {
+        // Somebody else has made this descriptor non-blocking — the reader no longer does. Give
+        // the terminal a moment, but by yielding rather than by waiting: this runs on a thread
+        // of the concurrency pool, which must not be parked.
+        attempts += 1
+        sched_yield()
         continue
       } else {
         break

@@ -117,7 +117,10 @@ public actor LineReader {
     render(prompt: prompt, buffer: buffer)
 
     while true {
-      guard let key = await decoder.next() else { throw LineReaderError.endOfFile }
+      guard let key = await decoder.next() else {
+        try Task.checkCancellation()
+        throw LineReaderError.endOfFile
+      }
 
       if key != .tab { completions.reset() }
 
@@ -266,6 +269,9 @@ public actor LineReader {
       }
       bytes.append(byte)
     }
+
+    // a cancelled read has not seen the end of the line, let alone the end of the input
+    try Task.checkCancellation()
 
     guard !bytes.isEmpty else { throw LineReaderError.endOfFile }
     return String(decoding: bytes, as: UTF8.self)

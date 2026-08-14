@@ -300,16 +300,19 @@ struct HistoryReplacementTests {
 }
 
 struct ByteStreamTests {
-  /// the flag is a property of the open file description, shared with whoever else holds it —
-  /// the shell that started us, for one — so it must not be left set
+  /// O_NONBLOCK belongs to the open file description, which is shared with whoever else holds
+  /// it, so a descriptor handed to us is put back as it was. A terminal is not touched at all:
+  /// the stream opens the controlling terminal itself, precisely because standard output shares
+  /// the description that standard input arrived on.
   @Test
-  func leavesTheDescriptorFlagsAsItFoundThem() async {
+  func putsTheDescriptorFlagsBackWhenItHasFinished() async {
     let keyboard = Keyboard()
     keyboard.type("x")
 
     let before = fcntl(keyboard.readEnd, F_GETFL)
     let stream = ByteStream(fileDescriptor: keyboard.readEnd)
     _ = await stream.next()
+    await stream.cancel()
     #expect(fcntl(keyboard.readEnd, F_GETFL) == before)
     keyboard.endInput()
   }
@@ -362,7 +365,86 @@ struct ByteStreamTests {
   }
 }
 
-struct SharedCompletionTests {
+struct EndOfFileTests {
+  private func makePipe() -> (readEnd: CInt, writeEnd: CInt) {
+    var descriptors = [CInt](repeating: 0, count: 2)
+    _ = descriptors.withUnsafeMutableBufferPointer { pipe($0.baseAddress!) }
+    return (descriptors[0], descriptors[1])
+  }
+
+  /// a delivery that brought nothing — because the consumer had already taken the bytes — must
+  /// not be mistaken for the input closing
+  @Test
+  func doesNotReportEndOfFileWhilstTheInputIsOpen() async {
+    let (readEnd, writeEnd) = makePipe()
+    let count = 400
+
+    let writer = Task.detached {
+      for index in 0..<count {
+        var byte = UInt8(ascii: "a") + UInt8(index % 26)
+        _ = write(writeEnd, &byte, 1)
+        if index.isMultiple(of: 8) {
+          try? await Task.sleep(for: .microseconds(200))
+        }
+      }
+    }
+
+    let stream = ByteStream(fileDescriptor: readEnd)
+    var read = 0
+    var endedEarly = false
+    while read < count {
+      if await stream.next(timeout: .seconds(5)) == nil {
+        endedEarly = true
+        break
+      }
+      read += 1
+    }
+
+    await writer.value
+    #expect(!endedEarly)
+    #expect(read == count)
+    close(writeEnd)
+    close(readEnd)
+  }
+
+  @Test
+  func aCancelledReadIsNotTheEndOfTheInput() async {
+    let (readEnd, writeEnd) = makePipe()
+    // a pipe is not a terminal, so the reader takes its unedited path
+    let reader = LineReader(terminal: Terminal(input: readEnd, output: writeEnd))
+
+    let reading = Task { try await reader.readLine() }
+    try? await Task.sleep(for: .milliseconds(50))
+    reading.cancel()
+
+    var cancelled = false
+    do {
+      _ = try await reading.value
+    } catch is CancellationError {
+      cancelled = true
+    } catch {}
+    #expect(cancelled)
+
+    close(writeEnd)
+    close(readEnd)
+  }
+
+  @Test
+  func flushingDropsWhatHasNotBeenConsumed() async {
+    let keyboard = Keyboard()
+    keyboard.type("abc")
+
+    let stream = ByteStream(fileDescriptor: keyboard.readEnd)
+    #expect(await stream.next() == UInt8(ascii: "a"))
+    await stream.flush()
+
+    keyboard.type("z")
+    #expect(await stream.next(timeout: .seconds(2)) == UInt8(ascii: "z"))
+    keyboard.endInput()
+  }
+}
+
+struct CompletionSharingTests {
   /// candidates that agree on nothing must not be applied, or the first tab press would delete
   /// what the user typed
   @Test
@@ -375,7 +457,7 @@ struct SharedCompletionTests {
   }
 }
 
-struct UnusedByteStreamTests {
+struct BufferedByteStreamTests {
   @Test
   func buffersBytesThatArriveBeforeTheyAreWanted() async {
     let keyboard = Keyboard()
