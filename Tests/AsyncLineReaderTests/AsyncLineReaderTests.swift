@@ -257,6 +257,48 @@ struct CompletionTests {
   }
 }
 
+struct StyleTests {
+  @Test
+  func buildsEscapeSequences() {
+    #expect(TextAttributes(.green, bold: true).escapeSequence == "\u{1B}[1;32m")
+    #expect(TextAttributes.none.escapeSequence == "")
+  }
+
+  @Test
+  func matchesTheBracketBeforeTheCursor() {
+    // a closing bracket just typed finds its opening partner
+    var buffer = LineBuffer(text: "call (a b)", cursor: 10)
+    #expect(buffer.matchingBrackets.map { [$0.0, $0.1] } == [5, 9])
+
+    // and the other way round, with the cursor just after an opening bracket
+    buffer = LineBuffer(text: "call (a b)", cursor: 6)
+    #expect(buffer.matchingBrackets.map { [$0.0, $0.1] } == [5, 9])
+  }
+
+  @Test
+  func skipsNestedBrackets() {
+    let buffer = LineBuffer(text: "((a) b)", cursor: 7)
+    #expect(buffer.matchingBrackets.map { [$0.0, $0.1] } == [0, 6])
+  }
+
+  @Test
+  func findsNoMatchWhenUnbalanced() {
+    let buffer = LineBuffer(text: "(a b", cursor: 1)
+    #expect(buffer.matchingBrackets == nil)
+  }
+}
+
+struct HistoryReplacementTests {
+  @Test
+  func replacesTheWholeHistory() {
+    var history = History()
+    history.append("old")
+    history.replace(with: ["one", "two"])
+    #expect(history.entries == ["one", "two"])
+    #expect(!history.isNavigating)
+  }
+}
+
 struct ByteStreamTests {
   @Test
   func buffersBytesThatArriveBeforeTheyAreWanted() async {

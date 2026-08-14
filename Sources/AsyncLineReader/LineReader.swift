@@ -48,6 +48,8 @@ public actor LineReader {
   private let decoder: KeyDecoder
   private var history = History()
   private var completionHandler: CompletionHandler?
+  private var style = Style.none
+  private var maximumLineLength: Int?
 
   /// Whether accepted lines are added to the history automatically.
   public var addsHistoryAutomatically = true
@@ -62,12 +64,26 @@ public actor LineReader {
     completionHandler = handler
   }
 
+  /// How the prompt, the line and matching brackets are coloured.
+  public func setStyle(_ style: Style) {
+    self.style = style
+  }
+
+  /// The longest line that may be typed, if it should be limited.
+  public func setMaximumLineLength(_ length: Int?) {
+    maximumLineLength = length
+  }
+
   public var historyEntries: [String] {
     history.entries
   }
 
   public func addHistory(_ line: String) {
     history.append(line)
+  }
+
+  public func replaceHistory(with entries: [String]) {
+    history.replace(with: entries)
   }
 
   public func setMaximumHistoryCount(_ count: Int) {
@@ -118,7 +134,11 @@ public actor LineReader {
         await complete(prompt: prompt, buffer: &buffer, state: &completions)
 
       case let .character(character):
-        buffer.insert(character)
+        if let maximumLineLength, buffer.count >= maximumLineLength {
+          bell()
+        } else {
+          buffer.insert(character)
+        }
 
       case .backspace:
         if !buffer.deleteBackward() { bell() }
@@ -347,12 +367,42 @@ public actor LineReader {
       cursor = available
     }
     let end = min(characters.count, start + available)
-    let visible = String(characters[start..<end])
 
     terminal.emit(
-      Ansi.carriageReturn + prompt + visible + Ansi.eraseToEndOfLine +
+      Ansi.carriageReturn + styled(prompt, with: style.prompt) +
+        styledLine(buffer, showing: start..<end) + Ansi.eraseToEndOfLine +
         Ansi.setColumn(promptWidth + cursor + 1)
     )
+  }
+
+  private func styled(_ text: String, with attributes: String) -> String {
+    attributes.isEmpty ? text : attributes + text + resetAttributes
+  }
+
+  /// The visible part of the line, with the bracket under the cursor and its match picked out.
+  private func styledLine(_ buffer: LineBuffer, showing range: Range<Int>) -> String {
+    let characters = buffer.characters
+    let brackets = style.matchingBracket.isEmpty ? nil : buffer.matchingBrackets
+
+    guard let brackets else {
+      return styled(String(characters[range]), with: style.input)
+    }
+
+    var text = ""
+    var applied: String?
+
+    for index in range {
+      let wanted = index == brackets.0 || index == brackets.1
+        ? style.matchingBracket
+        : style.input
+      if wanted != applied {
+        text += resetAttributes + wanted
+        applied = wanted
+      }
+      text.append(characters[index])
+    }
+
+    return text + resetAttributes
   }
 
   /// The width of a string as displayed, ignoring any escape sequences it contains so that a

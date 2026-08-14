@@ -28,6 +28,10 @@ struct LineBuffer: Equatable {
     characters.isEmpty
   }
 
+  var count: Int {
+    characters.count
+  }
+
   /// The text before the cursor, which is what a completion looks at.
   var textBeforeCursor: String {
     String(characters[0..<cursor])

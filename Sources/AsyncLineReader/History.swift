@@ -38,6 +38,14 @@ struct History: Equatable {
     }
   }
 
+  mutating func replace(with entries: [String]) {
+    self.entries = []
+    for entry in entries {
+      append(entry)
+    }
+    endNavigation()
+  }
+
   mutating func endNavigation() {
     index = nil
     pending = nil
