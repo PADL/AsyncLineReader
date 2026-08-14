@@ -62,6 +62,9 @@ if finished == nil { print("stopped") }
 The terminal keeps its signal handling whilst the command runs, so Ctrl-C behaves as it usually
 does. Pass `cancelOn:` to interrupt on some other key.
 
+History can be loaded from and saved to a file with `loadHistory(fromFile:)` and
+`saveHistory(toFile:)`, and `setStyle(_:)` colours the prompt, the line and matching brackets.
+
 ### Editing
 
 Arrow keys and Home/End, Ctrl-A/E/B/F for movement, Ctrl-W and Alt-B/F by word, Ctrl-K/U to kill
@@ -91,5 +94,5 @@ their lead say so.
 
 * multi line editing: a line longer than the terminal scrolls horizontally instead of wrapping
 * reverse incremental search (Ctrl-R)
-* persisting history to a file
+* hints, i.e. the greyed out suggestion linenoise shows to the right of the cursor
 * East Asian wide characters and combining marks are counted as one column each
