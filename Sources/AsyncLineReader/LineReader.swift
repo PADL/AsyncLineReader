@@ -64,7 +64,9 @@ public actor LineReader {
     decoder = KeyDecoder(stream: stream)
   }
 
-  /// Stops reading and lets the terminal go. A reader is not usable afterwards.
+  /// Stops reading and lets the terminal go, waiting until it has been released: a descriptor
+  /// passed in by the caller is theirs to close again only once this returns, as until then the
+  /// reader is still watching it. A reader is not usable afterwards.
   public func close() async {
     await stream.cancel()
   }

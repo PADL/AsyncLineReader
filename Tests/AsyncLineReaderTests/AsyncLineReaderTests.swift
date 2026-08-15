@@ -59,12 +59,17 @@ struct KeyDecoderTests {
     let keyboard = Keyboard()
     keyboard.type(bytes)
 
-    let decoder = KeyDecoder(stream: ByteStream(fileDescriptor: keyboard.readEnd))
+    let stream = ByteStream(fileDescriptor: keyboard.readEnd)
+    let decoder = KeyDecoder(stream: stream)
     var keys = [Key]()
     for _ in 0..<count {
       guard let key = await decoder.next() else { break }
       keys.append(key)
     }
+
+    // the stream has to let the descriptor go before the keyboard closes it, or its source will
+    // still be armed on a number that another test's pipe is about to be given
+    await stream.cancel()
     keyboard.endInput()
     return keys
   }
@@ -330,6 +335,7 @@ struct ByteStreamTests {
     try? await Task.sleep(for: .milliseconds(150))
     keyboard.type("b")
     #expect(await next.value == UInt8(ascii: "b"))
+    await stream.cancel()
     keyboard.endInput()
   }
 
@@ -342,6 +348,7 @@ struct ByteStreamTests {
     try? await Task.sleep(for: .milliseconds(50))
     next.cancel()
     #expect(await next.value == nil)
+    await stream.cancel()
     keyboard.endInput()
   }
 
@@ -361,6 +368,7 @@ struct ByteStreamTests {
       read.append(Character(UnicodeScalar(byte)))
     }
     #expect(read == "0123456789012345")
+    await stream.cancel()
     keyboard.endInput()
   }
 }
@@ -444,6 +452,7 @@ struct EndOfFileTests {
 
     keyboard.type("z")
     #expect(await stream.next(timeout: .seconds(2)) == UInt8(ascii: "z"))
+    await stream.cancel()
     keyboard.endInput()
   }
 }
@@ -470,6 +479,7 @@ struct BufferedByteStreamTests {
     let stream = ByteStream(fileDescriptor: keyboard.readEnd)
     #expect(await stream.next() == UInt8(ascii: "h"))
     #expect(await stream.next() == UInt8(ascii: "i"))
+    await stream.cancel()
     keyboard.endInput()
   }
 
@@ -494,6 +504,7 @@ struct BufferedByteStreamTests {
 
     keyboard.type("z")
     #expect(await stream.next() == UInt8(ascii: "z"))
+    await stream.cancel()
     keyboard.endInput()
   }
 
@@ -507,6 +518,7 @@ struct BufferedByteStreamTests {
     try await stream.unread(#require(first))
     #expect(await stream.next() == UInt8(ascii: "a"))
     #expect(await stream.next() == UInt8(ascii: "b"))
+    await stream.cancel()
     keyboard.endInput()
   }
 }
