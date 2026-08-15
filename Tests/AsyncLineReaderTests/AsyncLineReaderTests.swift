@@ -37,7 +37,6 @@ private struct Keyboard: ~Copyable {
   }
 
   func type(_ bytes: [UInt8]) {
-    var bytes = bytes
     _ = bytes.withUnsafeBytes { write(writeEnd, $0.baseAddress, $0.count) }
   }
 
