@@ -64,6 +64,11 @@ public actor LineReader {
     decoder = KeyDecoder(stream: stream)
   }
 
+  /// Stops reading and lets the terminal go. A reader is not usable afterwards.
+  public func close() async {
+    await stream.cancel()
+  }
+
   public func setCompletionHandler(_ handler: CompletionHandler?) {
     completionHandler = handler
   }

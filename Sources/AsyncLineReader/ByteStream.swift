@@ -32,6 +32,8 @@ private final class Input: Sendable {
     var bytes = [UInt8]()
     var isAtEnd = false
     var source: (any DispatchSourceRead)?
+    var hasStopped = false
+    var stopWaiter: CheckedContinuation<(), Never>?
   }
 
   private let state = Mutex(State())
@@ -62,9 +64,38 @@ private final class Input: Sendable {
   }
 
   func cancelSource() {
-    state.withLock {
-      $0.source?.cancel()
-      $0.source = nil
+    let hadSource = state.withLock { state -> Bool in
+      let source = state.source
+      state.source = nil
+      source?.cancel()
+      return source != nil
+    }
+
+    // nothing was ever started, so nothing has to stop
+    if !hadSource { sourceDidStop() }
+  }
+
+  /// Called when the dispatch source has stopped for good and the descriptor is nobody's but
+  /// ours again.
+  func sourceDidStop() {
+    let waiter = state.withLock { state -> CheckedContinuation<(), Never>? in
+      state.hasStopped = true
+      let waiter = state.stopWaiter
+      state.stopWaiter = nil
+      return waiter
+    }
+    waiter?.resume()
+  }
+
+  /// Waits for that to have happened.
+  func waitUntilStopped() async {
+    await withCheckedContinuation { continuation in
+      let resumeNow = state.withLock { state -> Bool in
+        guard !state.hasStopped else { return true }
+        state.stopWaiter = continuation
+        return false
+      }
+      if resumeNow { continuation.resume() }
     }
   }
 
@@ -83,7 +114,8 @@ actor ByteStream {
   private let fileDescriptor: CInt
   /// whether the descriptor is ours to make non-blocking, and to close
   private let ownsDescriptor: Bool
-  private var savedFlags: CInt?
+  /// whether the descriptor must be left blocking, and so read a byte at a time
+  private let readsOneAtATime: Bool
   private let queue = DispatchQueue(label: "com.padl.AsyncLineReader.input", qos: .userInteractive)
   private let input = Input()
   private var buffer = [UInt8]()
@@ -111,19 +143,23 @@ actor ByteStream {
       self.fileDescriptor = fileDescriptor
       ownsDescriptor = false
     }
+
+    // A terminal we could not open for ourselves — a process without a controlling terminal, or
+    // one given a terminal on standard input alone — is the case the descriptor of our own was
+    // meant to avoid. Rather than leave its description non-blocking for the whole session,
+    // where somebody else's write could fail, read it one keystroke at a time: a source only
+    // fires when there is something there, so a single read cannot block.
+    readsOneAtATime = !ownsDescriptor && isatty(fileDescriptor) != 0
   }
 
   deinit {
+    // the cancellation handler installed in start() closes or restores the descriptor, once the
+    // source has stopped using it
     input.cancelSource()
-    if ownsDescriptor {
-      close(fileDescriptor)
-    } else if let savedFlags {
-      _ = fcntl(fileDescriptor, F_SETFL, savedFlags)
-    }
   }
 
   private nonisolated static func openControllingTerminal(like fileDescriptor: CInt) -> CInt? {
-    let terminal = open("/dev/tty", O_RDONLY | O_NONBLOCK)
+    let terminal = open("/dev/tty", O_RDONLY | O_NONBLOCK | O_CLOEXEC)
     guard terminal >= 0 else { return nil }
 
     // only if it is the same terminal: standard input may have been redirected to another one
@@ -142,7 +178,8 @@ actor ByteStream {
   private func start() {
     guard !input.hasSource, !isFinished else { return }
 
-    if !ownsDescriptor {
+    var savedFlags: CInt?
+    if !ownsDescriptor, !readsOneAtATime {
       let flags = fcntl(fileDescriptor, F_GETFL)
       if flags >= 0, flags & O_NONBLOCK == 0 {
         savedFlags = flags
@@ -158,32 +195,49 @@ actor ByteStream {
         input.cancelSource()
         return
       }
-      let (bytes, isAtEnd) = Self.read(fileDescriptor: fileDescriptor)
+      let (bytes, isAtEnd) = Self.readAvailable(
+        fileDescriptor: fileDescriptor,
+        oneAtATime: readsOneAtATime
+      )
       input.append(bytes, isAtEnd: isAtEnd)
       Task { await self.deliver() }
     }
+    // Closing the descriptor, or putting its flags back, has to wait until the source has
+    // stopped: cancellation is asynchronous, and the handler may be inside a read. Restoring
+    // blocking mode underneath a read in flight would park the queue for ever.
+    let ownsDescriptor = ownsDescriptor
+    let fileDescriptor = fileDescriptor
+    source.setCancelHandler { [input] in
+      if ownsDescriptor {
+        close(fileDescriptor)
+      } else if let savedFlags {
+        _ = fcntl(fileDescriptor, F_SETFL, savedFlags)
+      }
+      input.sourceDidStop()
+    }
+
     source.resume()
     input.setSource(source)
   }
 
-  /// Reads what the descriptor has to offer, without making it non-blocking to do so: the flag
-  /// belongs to the open file description, which a terminal shares between standard input,
-  /// output and error, so setting it even briefly can make somebody else's write fail. Asking
-  /// how much is there first means each read is one the source has already promised will not
-  /// block.
-  private nonisolated static func read(
-    fileDescriptor: CInt
+  /// Reads everything the descriptor has to offer. This relies on the descriptor being
+  /// non-blocking — either one we opened that way, or one `start()` set — so that the loop ends
+  /// with EAGAIN rather than waiting for bytes that have not arrived.
+  private nonisolated static func readAvailable(
+    fileDescriptor: CInt,
+    oneAtATime: Bool = false
   ) -> (bytes: [UInt8], isAtEnd: Bool) {
     var bytes = [UInt8]()
-    var chunk = [UInt8](repeating: 0, count: 1024)
+    var chunk = [UInt8](repeating: 0, count: oneAtATime ? 1 : 1024)
 
     while true {
       let count = chunk.withUnsafeMutableBytes {
-        Glibc.read(fileDescriptor, $0.baseAddress, $0.count)
+        read(fileDescriptor, $0.baseAddress, $0.count)
       }
 
       if count > 0 {
         bytes.append(contentsOf: chunk[0..<count])
+        if oneAtATime { return (bytes, false) }
       } else if count == 0 {
         return (bytes, true)
       } else if errno == EINTR {
@@ -273,18 +327,16 @@ actor ByteStream {
     input.discard()
   }
 
-  /// Stops reading. Bytes already buffered remain available.
-  func cancel() {
+  /// Stops reading and waits for the descriptor to be let go: closed, if it was ours, and put
+  /// back as it was found if it was not. Bytes already buffered remain available.
+  func cancel() async {
     finish()
     resumeWaiter()
+    await input.waitUntilStopped()
   }
 
   private func finish() {
     isFinished = true
     input.cancelSource()
-    if !ownsDescriptor, let savedFlags {
-      _ = fcntl(fileDescriptor, F_SETFL, savedFlags)
-      self.savedFlags = nil
-    }
   }
 }

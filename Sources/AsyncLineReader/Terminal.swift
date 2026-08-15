@@ -50,7 +50,9 @@ public struct Terminal: Sendable {
     let bytes = Array(string.utf8)
     var offset = 0
     var attempts = 0
-    let maximumAttempts = 64
+    let yieldAttempts = 16
+    // sixteen yields and then a millisecond apiece: a quarter of a second of grace in all
+    let maximumAttempts = 256
     while offset < bytes.count {
       let count = bytes[offset...].withUnsafeBytes {
         write(output, $0.baseAddress, $0.count)
@@ -63,10 +65,15 @@ public struct Terminal: Sendable {
         continue
       } else if count < 0, errno == EAGAIN || errno == EWOULDBLOCK, attempts < maximumAttempts {
         // Somebody else has made this descriptor non-blocking — the reader no longer does. Give
-        // the terminal a moment, but by yielding rather than by waiting: this runs on a thread
-        // of the concurrency pool, which must not be parked.
+        // the terminal time to drain, but in small pieces: this runs on a thread of the
+        // concurrency pool, which must not be parked for long.
         attempts += 1
-        sched_yield()
+        if attempts < yieldAttempts {
+          sched_yield()
+        } else {
+          var pause = timespec(tv_sec: 0, tv_nsec: 1_000_000)
+          nanosleep(&pause, nil)
+        }
         continue
       } else {
         break

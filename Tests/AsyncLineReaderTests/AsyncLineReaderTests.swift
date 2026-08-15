@@ -403,6 +403,9 @@ struct EndOfFileTests {
     await writer.value
     #expect(!endedEarly)
     #expect(read == count)
+
+    // stop the stream before the descriptor goes: the source is armed on it
+    await stream.cancel()
     close(writeEnd)
     close(readEnd)
   }
@@ -425,6 +428,7 @@ struct EndOfFileTests {
     } catch {}
     #expect(cancelled)
 
+    await reader.close()
     close(writeEnd)
     close(readEnd)
   }
