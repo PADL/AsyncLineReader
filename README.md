@@ -1,5 +1,7 @@
 # AsyncLineReader
 
+_Note; this package was solely written by Claude (under my guidance). It does, however, appear to be functional and useful._
+
 A line editor for command line programs written with Swift concurrency. It exists because the
 existing Swift ports of linenoise are synchronous: `readLine()` parks a thread until the user
 presses return, and the completion callback has to answer immediately. A program whose commands
