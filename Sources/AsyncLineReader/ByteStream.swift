@@ -14,24 +14,28 @@
 // limitations under the License.
 //
 
-@preconcurrency import Dispatch
 import Synchronization
 
 #if canImport(Glibc)
+@preconcurrency import Dispatch
 import Glibc
 #elseif canImport(Darwin)
+@preconcurrency import Dispatch
 import Darwin
+#elseif canImport(WinSDK)
+import ucrt
+import WinSDK
 #endif
 
-/// What the dispatch source has read, and the source itself. Both live outside the actor: the
-/// source appends under a lock in arrival order rather than hopping to the actor, where the order
-/// would be decided by whichever hop ran first, and holding the source here lets it be cancelled
-/// when the stream goes away.
-private final class Input: Sendable {
+/// What whatever is doing the reading has read, and the means of stopping it. Both live outside
+/// the actor: the reader appends under a lock in arrival order rather than hopping to the actor,
+/// where the order would be decided by whichever hop ran first, and holding on to it here lets it
+/// be stopped when the stream goes away.
+final class Input: Sendable {
   private struct State {
     var bytes = [UInt8]()
     var isAtEnd = false
-    var source: (any DispatchSourceRead)?
+    var stop: (@Sendable () -> Void)?
     var hasStopped = false
     var stopWaiter: CheckedContinuation<(), Never>?
   }
@@ -59,16 +63,17 @@ private final class Input: Sendable {
     state.withLock { $0.bytes = [] }
   }
 
-  func setSource(_ source: (any DispatchSourceRead)?) {
-    state.withLock { $0.source = source }
+  /// Holds on to the reader, by way of what stops it.
+  func setSource(_ stop: (@Sendable () -> Void)?) {
+    state.withLock { $0.stop = stop }
   }
 
   func cancelSource() {
     let hadSource = state.withLock { state -> Bool in
-      let source = state.source
-      state.source = nil
-      source?.cancel()
-      return source != nil
+      let stop = state.stop
+      state.stop = nil
+      stop?()
+      return stop != nil
     }
 
     // nothing was ever started, so nothing has to stop
@@ -100,23 +105,25 @@ private final class Input: Sendable {
   }
 
   var hasSource: Bool {
-    state.withLock { $0.source != nil }
+    state.withLock { $0.stop != nil }
   }
 }
 
-/// Delivers the bytes of a file descriptor to an async consumer, without a thread parked in
-/// `read(2)`: a dispatch source does the reading, and buffers whatever the consumer is not yet
-/// ready for.
+/// Delivers the bytes of a file descriptor to an async consumer, without a thread of the
+/// concurrency pool parked in a read: a dispatch source does the reading, or on Windows a thread
+/// of the reader's own, and whatever the consumer is not yet ready for is buffered.
 ///
 /// A stream has a single consumer. Bytes that arrive whilst nobody is waiting, or after a read
 /// has timed out, are buffered rather than dropped.
 actor ByteStream {
   private let fileDescriptor: CInt
+  #if !canImport(WinSDK)
   /// whether the descriptor is ours to make non-blocking, and to close
   private let ownsDescriptor: Bool
   /// whether the descriptor must be left blocking, and so read a byte at a time
   private let readsOneAtATime: Bool
   private let queue = DispatchQueue(label: "com.padl.AsyncLineReader.input", qos: .userInteractive)
+  #endif
   private let input = Input()
   private var buffer = [UInt8]()
   private var waiter: CheckedContinuation<(), Never>?
@@ -130,6 +137,14 @@ actor ByteStream {
     isFinished && buffer.isEmpty
   }
 
+  #if canImport(WinSDK)
+  /// Nothing here is made non-blocking: the reader has a thread of its own, and only ever asks
+  /// for what the descriptor already holds. So the descriptor is used as it was given, and is
+  /// left as it was found.
+  init(fileDescriptor: CInt) {
+    self.fileDescriptor = fileDescriptor
+  }
+  #else
   /// Reading without blocking needs O_NONBLOCK, which belongs to the open file description
   /// rather than to the descriptor — and a terminal's is shared with standard output and error,
   /// where making it non-blocking makes somebody else's write fail. So when the descriptor is a
@@ -151,12 +166,36 @@ actor ByteStream {
     // fires when there is something there, so a single read cannot block.
     readsOneAtATime = !ownsDescriptor && isatty(fileDescriptor) != 0
   }
+  #endif
 
   deinit {
     // the cancellation handler installed in start() closes or restores the descriptor, once the
     // source has stopped using it
     input.cancelSource()
   }
+
+  #if canImport(WinSDK)
+
+  private func start() {
+    guard !input.hasSource, !isFinished else { return }
+
+    let reader = InputReader(fileDescriptor: fileDescriptor, input: input) { [weak self] in
+      guard let self else { return }
+      Task { await self.deliver() }
+    }
+
+    guard let reader else {
+      // there is nothing there to read: say so rather than leave a consumer waiting for bytes
+      // that cannot come
+      input.append([], isAtEnd: true)
+      return
+    }
+
+    input.setSource { reader.cancel() }
+    reader.start()
+  }
+
+  #else
 
   private nonisolated static func openControllingTerminal(like fileDescriptor: CInt) -> CInt? {
     let terminal = open("/dev/tty", O_RDONLY | O_NONBLOCK | O_CLOEXEC)
@@ -248,6 +287,8 @@ actor ByteStream {
       }
     }
   }
+
+  #endif
 
   /// Moves whatever has been read into the buffer. A consumer is only woken if this brought
   /// something for it: an empty delivery, which happens when the consumer got there first, must

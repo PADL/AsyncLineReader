@@ -20,9 +20,32 @@ import Testing
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif canImport(WinSDK)
+import ucrt
+import WinSDK
 #endif
 
 @testable import AsyncLineReader
+
+#if canImport(WinSDK)
+// the C runtime has all of these, under the names it gives what is not standard C, and wants to
+// be told how big a pipe is to be and whether it translates line endings
+
+@discardableResult
+private func pipe(_ descriptors: UnsafeMutablePointer<CInt>) -> CInt {
+  _pipe(descriptors, 4096, _O_BINARY)
+}
+
+@discardableResult
+private func write(_ fileDescriptor: CInt, _ bytes: UnsafeRawPointer?, _ count: Int) -> Int {
+  Int(_write(fileDescriptor, bytes, UInt32(count)))
+}
+
+@discardableResult
+private func close(_ fileDescriptor: CInt) -> CInt {
+  _close(fileDescriptor)
+}
+#endif
 
 /// A pipe standing in for a terminal, so that keystrokes can be fed to the decoder.
 private struct Keyboard: ~Copyable {
@@ -304,10 +327,12 @@ struct HistoryReplacementTests {
 }
 
 struct ByteStreamTests {
+  #if !canImport(WinSDK)
   /// O_NONBLOCK belongs to the open file description, which is shared with whoever else holds
   /// it, so a descriptor handed to us is put back as it was. A terminal is not touched at all:
   /// the stream opens the controlling terminal itself, precisely because standard output shares
-  /// the description that standard input arrived on.
+  /// the description that standard input arrived on. Windows has no equivalent to put back: the
+  /// reader waits on a thread of its own rather than making anything non-blocking.
   @Test
   func putsTheDescriptorFlagsBackWhenItHasFinished() async {
     let keyboard = Keyboard()
@@ -320,6 +345,7 @@ struct ByteStreamTests {
     #expect(fcntl(keyboard.readEnd, F_GETFL) == before)
     keyboard.endInput()
   }
+  #endif
 
   /// a read that finished before its timeout must not end the read that follows it
   @Test

@@ -7,7 +7,7 @@ existing Swift ports of linenoise are synchronous: `readLine()` parks a thread u
 presses return, and the completion callback has to answer immediately. A program whose commands
 are `async` — talking to a device, a database, a server — then has to bridge back with semaphores.
 
-Here the terminal is read by a dispatch source rather than a parked thread, and everything that
+Here the terminal is read without parking the thread that asked for a line, and everything that
 waits is a suspension that can be cancelled:
 
 * `readLine(prompt:)` is `async` and throws on Ctrl-C or end of input
@@ -74,6 +74,14 @@ to either end, Ctrl-T to transpose, Ctrl-L to clear, up and down (or Ctrl-P/N) f
 line still being typed is preserved whilst walking through the history and restored on the way
 back. If standard input is not a terminal, lines are read without any of this, so piped input
 works unchanged.
+
+## Platforms
+
+macOS, Linux and Windows. On Unix the terminal is put into raw mode and read by a dispatch
+source. On Windows the console is put into virtual terminal input mode — where it delivers the
+same escape sequences the decoder already understands — and is read on a thread of its own,
+there being no dispatch source that can wait on a console. Everything above the reading is the
+same on all three.
 
 ## Building
 
