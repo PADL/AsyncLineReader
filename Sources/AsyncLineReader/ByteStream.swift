@@ -256,7 +256,7 @@ actor ByteStream {
     }
 
     source.resume()
-    input.setSource(source)
+    input.setSource { source.cancel() }
   }
 
   /// Reads everything the descriptor has to offer. This relies on the descriptor being
